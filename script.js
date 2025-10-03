@@ -1,5 +1,5 @@
 // Load the zones GeoJSON and then do the location check
-fetch("zones.geojson")
+fetch("potential type 1 billboard locations.geojson")
   .then((res) => res.json())
   .then((zonesData) => {
     // Initialize the map
