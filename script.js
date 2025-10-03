@@ -32,106 +32,112 @@ function bearingToDirection(bearing) {
   return dirs[Math.round(bearing / 45) % 8];
 }
 
-// Detect Safari (on iOS or macOS)
+// Detect Safari
 function isSafari() {
   const ua = navigator.userAgent;
   return ua.includes("Safari") && !ua.includes("Chrome") && !ua.includes("Chromium");
 }
 
-// Load GeoJSON zones and map
-fetch("zones.geojson")
-  .then((res) => res.json())
-  .then((zonesData) => {
-    const map = L.map("map");
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19 }).addTo(map);
-    const zonesLayer = L.geoJSON(zonesData).addTo(map);
+// Main function to check location
+function checkLocation(zonesLayer, map) {
+  if (!("geolocation" in navigator)) {
+    document.getElementById("result").textContent = "Geolocation not supported.";
+    return;
+  }
 
-    const group = L.featureGroup([zonesLayer]);
-    map.fitBounds(group.getBounds(), { padding: [50,50] });
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      const userLat = pos.coords.latitude;
+      const userLng = pos.coords.longitude;
 
-    // Main function to check location
-    const checkLocation = () => {
-      if (!("geolocation" in navigator)) {
-        document.getElementById("result").textContent = "Geolocation not supported.";
+      // Add marker
+      const userMarker = L.marker([userLat, userLng]).addTo(map);
+      userMarker.bindPopup("You are here").openPopup();
+      map.fitBounds(L.featureGroup([zonesLayer, userMarker]).getBounds(), {padding:[50,50]});
+
+      // Check if inside any zone
+      let insideZone = false;
+      zonesLayer.eachLayer(layer => {
+        if (layer.getBounds().contains([userLat, userLng])) insideZone = true;
+      });
+
+      const resultDiv = document.getElementById("result");
+      if (insideZone) {
+        resultDiv.textContent = "✅ You ARE inside a zone where billboards are permitted.";
         return;
       }
 
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          const userLat = pos.coords.latitude;
-          const userLng = pos.coords.longitude;
+      // Compute nearest edge
+      let minDistance = Infinity;
+      let closestPoint = null;
+      zonesLayer.eachLayer(layer => {
+        const coords = layer.feature.geometry.coordinates;
+        const polygons = layer.feature.geometry.type === "MultiPolygon" ? coords.flat(1) : coords;
 
-          // Add marker
-          const userMarker = L.marker([userLat, userLng]).addTo(map);
-          userMarker.bindPopup("You are here").openPopup();
-          map.fitBounds(L.featureGroup([zonesLayer, userMarker]).getBounds(), {padding:[50,50]});
-
-          // Check if inside any zone
-          let insideZone = false;
-          zonesLayer.eachLayer(layer => {
-            if (layer.getBounds().contains([userLat, userLng])) insideZone = true;
-          });
-
-          const resultDiv = document.getElementById("result");
-          if (insideZone) {
-            resultDiv.textContent = "✅ You ARE inside a zone where billboards are permitted.";
-            return;
-          }
-
-          // Compute nearest edge
-          let minDistance = Infinity;
-          let closestPoint = null;
-          zonesLayer.eachLayer(layer => {
-            const coords = layer.feature.geometry.coordinates;
-            const polygons = layer.feature.geometry.type === "MultiPolygon" ? coords.flat(1) : coords;
-
-            polygons.forEach(ring => {
-              for (let i=0; i<ring.length-1; i++){
-                const [lon1, lat1] = ring[i];
-                const [lon2, lat2] = ring[i+1];
-                for (let t=0; t<=1; t+=0.1){
-                  const lat = lat1 + (lat2 - lat1)*t;
-                  const lon = lon1 + (lon2 - lon1)*t;
-                  const dist = haversineDistance(userLat, userLng, lat, lon);
-                  if(dist < minDistance){
-                    minDistance = dist;
-                    closestPoint = {lat, lon};
-                  }
-                }
+        polygons.forEach(ring => {
+          for (let i=0; i<ring.length-1; i++){
+            const [lon1, lat1] = ring[i];
+            const [lon2, lat2] = ring[i+1];
+            for (let t=0; t<=1; t+=0.1){
+              const lat = lat1 + (lat2 - lat1)*t;
+              const lon = lon1 + (lon2 - lon1)*t;
+              const dist = haversineDistance(userLat, userLng, lat, lon);
+              if(dist < minDistance){
+                minDistance = dist;
+                closestPoint = {lat, lon};
               }
-            });
-          });
-
-          if(closestPoint){
-            const distMiles = minDistance / 1609.344;
-            const bearing = bearingTo(userLat, userLng, closestPoint.lat, closestPoint.lon);
-            const direction = bearingToDirection(bearing);
-
-            let displayDist = distMiles < 0.5 ? `${Math.round(minDistance*3.28084).toLocaleString()} ft` : `${distMiles.toFixed(2)} miles`;
-            resultDiv.textContent = `❌ You are NOT inside a permitted zone. Nearest zone is ${displayDist} to the ${direction}.`;
-          } else {
-            resultDiv.textContent = "❌ You are NOT inside a permitted zone (no geometry found).";
+            }
           }
+        });
+      });
 
-        },
-        () => {
-          document.getElementById("result").textContent = "Location access denied or unavailable.";
-        }
-      );
-    };
+      if(closestPoint){
+        const distMiles = minDistance / 1609.344;
+        const bearing = bearingTo(userLat, userLng, closestPoint.lat, closestPoint.lon);
+        const direction = bearingToDirection(bearing);
 
-    // Safari gets button, others run immediately
-    if(isSafari()){
-      const btn = document.getElementById("checkLocation");
-      btn.style.display = "inline-block";
-      btn.addEventListener("click", checkLocation);
-      document.getElementById("result").textContent = "Click the button to check your location.";
-    } else {
-      checkLocation();
-    }
+        let displayDist = distMiles < 0.5 ? `${Math.round(minDistance*3.28084).toLocaleString()} ft` : `${distMiles.toFixed(2)} miles`;
+        resultDiv.textContent = `❌ You are NOT inside a permitted zone. Nearest zone is ${displayDist} to the ${direction}.`;
+      } else {
+        resultDiv.textContent = "❌ You are NOT inside a permitted zone (no geometry found).";
+      }
 
-  })
-  .catch(err => {
-    console.error("Error loading zones.geojson:", err);
-    document.getElementById("result").textContent = "Couldn't load zone data.";
-  });
+    },
+    (err) => {
+      document.getElementById("result").textContent = "Location access denied or unavailable.";
+      console.error("Geolocation error:", err);
+    },
+    {enableHighAccuracy:true, timeout:10000, maximumAge:0} // better iOS support
+  );
+}
+
+// Load GeoJSON and initialize map
+document.addEventListener("DOMContentLoaded", () => {
+  fetch("zones.geojson")
+    .then(res => res.json())
+    .then(zonesData => {
+      const map = L.map("map");
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19}).addTo(map);
+      const zonesLayer = L.geoJSON(zonesData).addTo(map);
+
+      const group = L.featureGroup([zonesLayer]);
+      map.fitBounds(group.getBounds(), {padding:[50,50]});
+
+      // Safari gets a button
+      if(isSafari()){
+        const btn = document.getElementById("checkLocation");
+        btn.style.display = "inline-block";
+        btn.textContent = "Check My Location";
+        btn.addEventListener("click", () => checkLocation(zonesLayer, map));
+        document.getElementById("result").textContent = "Tap the button to check your location.";
+      } else {
+        // Other browsers run automatically
+        checkLocation(zonesLayer, map);
+      }
+
+    })
+    .catch(err => {
+      console.error("Error loading zones.geojson:", err);
+      document.getElementById("result").textContent = "Couldn't load zone data.";
+    });
+});
