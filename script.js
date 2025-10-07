@@ -1,138 +1,174 @@
-document.addEventListener("DOMContentLoaded", function () {
-    const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
-    const urlParams = new URLSearchParams(window.location.search);
-    const mode = urlParams.get("mode");
-    const latParam = urlParams.get("lat");
-    const lngParam = urlParams.get("lng");
+// --- Helper Functions ---
 
-    // Initialize Map
-    var map = L.map('map').setView([0, 0], 2);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+// Haversine distance in meters
+function haversineDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = (v) => (v * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) *
+      Math.cos(toRad(lat2)) *
+      Math.sin(dLon / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
 
-    let zonePolygons = [];
+// Bearing in degrees
+function bearingTo(lat1, lon1, lat2, lon2) {
+  const toRad = (v) => (v * Math.PI) / 180;
+  const toDeg = (v) => (v * 180) / Math.PI;
+  const dLon = toRad(lon2 - lon1);
+  const y = Math.sin(dLon) * Math.cos(toRad(lat2));
+  const x =
+    Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+    Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLon);
+  let brng = toDeg(Math.atan2(y, x));
+  return (brng + 360) % 360;
+}
 
-    // Load Zones
-    fetch('zones.geojson')
-        .then(response => response.json())
-        .then(data => {
-            L.geoJSON(data, {
-                style: { color: 'red', weight: 2, fillOpacity: 0.1 },
-                onEachFeature: (feature, layer) => zonePolygons.push(layer)
-            }).addTo(map);
+// Convert bearing to compass direction
+function bearingToDirection(bearing) {
+  const dirs = ["N","NE","E","SE","S","SW","W","NW"];
+  return dirs[Math.round(bearing / 45) % 8];
+}
 
-            if (mode === "silent" && latParam && lngParam) {
-                runSilentMode(parseFloat(latParam), parseFloat(lngParam));
-                return;
+// Detect Safari
+function isSafari() {
+  const ua = navigator.userAgent;
+  return ua.includes("Safari") && !ua.includes("Chrome") && !ua.includes("Chromium");
+}
+
+// --- New: Silent Mode Check ---
+const urlParams = new URLSearchParams(window.location.search);
+const isSilent = urlParams.get("mode") === "silent";
+const silentLat = parseFloat(urlParams.get("lat"));
+const silentLng = parseFloat(urlParams.get("lng"));
+const hasSilentCoords = !isNaN(silentLat) && !isNaN(silentLng);
+
+// Main location check
+function checkLocation(zonesLayer, map, overrideLat = null, overrideLng = null, silentOutput = false) {
+  const handlePosition = (userLat, userLng) => {
+    // Check if inside any zone
+    let insideZone = false;
+    zonesLayer.eachLayer(layer => {
+      if (layer.getBounds().contains([userLat, userLng])) insideZone = true;
+    });
+
+    if (silentOutput) {
+      document.write(insideZone ? "inside" : "outside");
+      return;
+    }
+
+    const resultDiv = document.getElementById("result");
+    if (insideZone) {
+      resultDiv.textContent = "✅ You ARE inside a zone where billboards are permitted.";
+      return;
+    }
+
+    // Compute nearest edge
+    let minDistance = Infinity;
+    let closestPoint = null;
+    zonesLayer.eachLayer(layer => {
+      const coords = layer.feature.geometry.coordinates;
+      const polygons = layer.feature.geometry.type === "MultiPolygon" ? coords.flat(1) : coords;
+
+      polygons.forEach(ring => {
+        for (let i=0; i<ring.length-1; i++){
+          const [lon1, lat1] = ring[i];
+          const [lon2, lat2] = ring[i+1];
+          for (let t=0; t<=1; t+=0.1){
+            const lat = lat1 + (lat2 - lat1)*t;
+            const lon = lon1 + (lon2 - lon1)*t;
+            const dist = haversineDistance(userLat, userLng, lat, lon);
+            if(dist < minDistance){
+              minDistance = dist;
+              closestPoint = {lat, lon};
             }
-
-            if (!isSafari) {
-                requestLocation(); // Auto-run everywhere except Safari
-            } else {
-                showSafariButton();
-            }
-        })
-        .catch(() => {
-            showError("Failed to load zones.geojson. Ensure the file exists in the repository.");
-        });
-
-    function requestLocation() {
-        if (!navigator.geolocation) {
-            showError("Geolocation is not supported by your browser.");
-            return;
+          }
         }
+      });
+    });
 
-        navigator.geolocation.getCurrentPosition(showPosition, showError, {
-            enableHighAccuracy: true,
-            timeout: 10000,
-            maximumAge: 0
-        });
+    if (closestPoint) {
+      const distMiles = minDistance / 1609.344;
+      const bearing = bearingTo(userLat, userLng, closestPoint.lat, closestPoint.lon);
+      const direction = bearingToDirection(bearing);
+
+      let displayDist = distMiles < 0.5 ? `${Math.round(minDistance*3.28084).toLocaleString()} ft` : `${distMiles.toFixed(2)} miles`;
+      resultDiv.textContent = `❌ You are NOT inside a permitted zone. Nearest zone is ${displayDist} to the ${direction}.`;
+    } else {
+      resultDiv.textContent = "❌ You are NOT inside a permitted zone (no geometry found).";
     }
+  };
 
-    function showSafariButton() {
-        const button = document.createElement('button');
-        button.textContent = "Check My Location";
-        button.style.marginTop = "10px";
-        button.style.padding = "12px 18px";
-        button.style.fontSize = "16px";
-        button.style.background = "#007bff";
-        button.style.color = "white";
-        button.style.border = "none";
-        button.style.borderRadius = "5px";
-        button.style.cursor = "pointer";
+  if (overrideLat !== null && overrideLng !== null) {
+    handlePosition(overrideLat, overrideLng);
+    return;
+  }
 
-        const container = document.getElementById("status");
-        container.innerHTML = ""; // Clear any text
-        container.appendChild(button);
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      const userLat = pos.coords.latitude;
+      const userLng = pos.coords.longitude;
 
-        button.addEventListener("click", () => {
-            button.disabled = true;
-            button.textContent = "Requesting Location...";
+      if (!silentOutput) {
+        const userMarker = L.marker([userLat, userLng]).addTo(map);
+        userMarker.bindPopup("You are here").openPopup();
+        map.fitBounds(L.featureGroup([zonesLayer, userMarker]).getBounds(), {padding:[50,50]});
+      }
+      handlePosition(userLat, userLng);
 
-            requestLocation(); // ✅ First geolocation call happens strictly from tap — Safari must show prompt
-        });
-    }
+    },
+    (err) => {
+      if (silentOutput) {
+        document.write("outside");
+      } else {
+        document.getElementById("result").textContent = "Location access denied or unavailable.";
+      }
+      console.error("Geolocation error:", err);
+    },
+    {enableHighAccuracy:true, timeout:10000, maximumAge:0}
+  );
+}
 
-    function showPosition(position) {
-        const lat = position.coords.latitude;
-        const lng = position.coords.longitude;
+// --- Init ---
 
-        map.setView([lat, lng], 15);
+document.addEventListener("DOMContentLoaded", () => {
+  fetch("zones.geojson")
+    .then(res => res.json())
+    .then(zonesData => {
+      if (isSilent && hasSilentCoords) {
+        const tempLayer = L.geoJSON(zonesData);
+        checkLocation(tempLayer, null, silentLat, silentLng, true);
+        return;
+      }
 
-        const userMarker = L.marker([lat, lng]).addTo(map);
-        userMarker.bindPopup("Your Location").openPopup();
+      const map = L.map("map");
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19}).addTo(map);
+      const zonesLayer = L.geoJSON(zonesData).addTo(map);
 
-        const insideZone = zonePolygons.some(polygon => leafletPip.pointInLayer([lng, lat], polygon).length > 0);
+      const group = L.featureGroup([zonesLayer]);
+      map.fitBounds(group.getBounds(), {padding:[50,50]});
 
-        if (insideZone) {
-            updateMessage("✅ You ARE inside a zone where billboards are permitted.");
-        } else {
-            calculateNearestZone(lat, lng);
-        }
-    }
+      if(isSafari()){
+        const btn = document.getElementById("checkLocation");
+        btn.style.display = "inline-block";
+        btn.textContent = "Check My Location";
+        btn.addEventListener("click", () => checkLocation(zonesLayer, map));
+        document.getElementById("result").textContent = "Tap the button to check your location.";
+      } else {
+        checkLocation(zonesLayer, map);
+      }
 
-    function calculateNearestZone(lat, lng) {
-        let minDistance = Infinity;
-        let nearestDirection = null;
-
-        zonePolygons.forEach(polygon => {
-            polygon.getLatLngs()[0].forEach(point => {
-                const distance = map.distance([lat, lng], point);
-                if (distance < minDistance) {
-                    minDistance = distance;
-                    nearestDirection = getCardinalDirection(lat, lng, point.lat, point.lng);
-                }
-            });
-        });
-
-        const miles = minDistance / 1609.34;
-        const displayDistance = miles < 0.5 ? `${(miles * 5280).toFixed(0)} ft` : `${miles.toFixed(2)} miles`;
-
-        updateMessage(`❌ You are NOT inside a permitted zone. Nearest zone is ${displayDistance} to the ${nearestDirection}.`);
-    }
-
-    function getCardinalDirection(lat1, lng1, lat2, lng2) {
-        const angle = Math.atan2(lat2 - lat1, lng2 - lng1) * (180 / Math.PI);
-        if (angle < 0) angle += 360;
-        if (angle >= 337.5 || angle < 22.5) return "E";
-        if (angle >= 22.5 && angle < 67.5) return "NE";
-        if (angle >= 67.5 && angle < 112.5) return "N";
-        if (angle >= 112.5 && angle < 157.5) return "NW";
-        if (angle >= 157.5 && angle < 202.5) return "W";
-        if (angle >= 202.5 && angle < 247.5) return "SW";
-        if (angle >= 247.5 && angle < 292.5) return "S";
-        return "SE";
-    }
-
-    function updateMessage(text) {
-        document.getElementById("status").textContent = text;
-    }
-
-    function showError(error) {
-        document.getElementById("status").textContent = `⚠️ Error: ${error.message || error}`;
-    }
-
-    function runSilentMode(lat, lng) {
-        const insideZone = zonePolygons.some(polygon => leafletPip.pointInLayer([lng, lat], polygon).length > 0);
-        document.body.innerHTML = insideZone ? "inside" : "outside";
-    }
+    })
+    .catch(err => {
+      console.error("Error loading zones.geojson:", err);
+      if (isSilent) {
+        document.write("outside");
+      } else {
+        document.getElementById("result").textContent = "Couldn't load zone data.";
+      }
+    });
 });
